@@ -1,50 +1,47 @@
 ﻿using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
-using System.Threading.Tasks;
-using System.Xml;
 
 namespace Container_Socket_Client
-{   
-    class Container
+{
+    class Container:IDisposable
     {
         /// <summary>
-        /// 通知form委托
+        /// 处理信息委托
         /// </summary>
         public Action<string> MessageAction=null;
 
         /// <summary>
         /// 定时重连
         /// </summary>
-        private System.Threading.Timer _Timer;
+        private System.Threading.Timer _Timer=null;
 
-        public Container()
-        {
-            _Timer = new System.Threading.Timer(AutoLink,0,TimeSpan.FromSeconds(5),TimeSpan.FromSeconds(5));
-        }
+#pragma warning disable IDE0044 // 添加只读修饰符
+        private IPEndPoint IPE=null;
+#pragma warning restore IDE0044 // 添加只读修饰符
+        private Socket Client=null;
 
-        private void AutoLink(object state)
+        /// <summary>
+        /// 初始化自动连接
+        /// </summary>
+        public Container(string Ip, int Port)
         {
-            AsyncConect2server("127.0.0.1",12011);
+            IPE = new IPEndPoint(IPAddress.Parse(Ip), Port);
+            _Timer = new System.Threading.Timer(AsyncConect2server,null,TimeSpan.FromSeconds(5),TimeSpan.FromSeconds(5));
         }
 
         /// <summary>
         /// 异步链接服务器
         /// </summary>
-        /// <param name="Ip"></param>
-        /// <param name="Port"></param>
-        public void AsyncConect2server(string Ip,int Port)
+        public void AsyncConect2server(object state)
         {
-            IPEndPoint IPE = new IPEndPoint(IPAddress.Parse(Ip), Port);
-            Socket Client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            IAsyncResult ar= Client.BeginConnect(IPE, new AsyncCallback(ConnectCallBack), Client);
-            ar.AsyncWaitHandle.WaitOne();
+            Client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            IAsyncResult ar = Client.BeginConnect(IPE, new AsyncCallback(ConnectCallBack), Client);
             MessageAction?.Invoke("start link to server");
-            AsyncReceive(Client);
+            ar.AsyncWaitHandle.WaitOne();
+            
         }
 
         /// <summary>
@@ -55,18 +52,21 @@ namespace Container_Socket_Client
         {
             try
             {
-                Socket Client = (Socket)ar.AsyncState;
+                Client = (Socket)ar.AsyncState;
                 Client.EndConnect(ar);
-                MessageAction?.Invoke(string.Format("Connect server：{0} \n",Client.RemoteEndPoint.ToString()));
+                AsyncReceive(Client);
                 _Timer.Change(-1, -1);//停止定时器
+                MessageAction?.Invoke(string.Format("Connect server：{0} \r\n",Client.RemoteEndPoint.ToString()));
             }
             catch (SocketException ex)
             {
-                MessageAction?.Invoke(string.Format("An error occurred when attempting to access the socket：{0}\n", ex.ToString()));
+                Client.Close();
+                MessageAction?.Invoke(string.Format("An error occurred when attempting to access the socket：{0}\r\n", ex.ToString()));
             }
             catch(ObjectDisposedException ex)
             {
-                MessageAction?.Invoke(string.Format("The Socket has been closed：{0}\n", ex.ToString()));
+                Client.Close();
+                MessageAction?.Invoke(string.Format("The Socket has been closed：{0}\r\n", ex.ToString()));
             }            
         }
 
@@ -82,7 +82,8 @@ namespace Container_Socket_Client
             }
             catch (Exception ex)
             {
-                MessageAction?.Invoke(string.Format("link error：\n", ex.ToString()));
+                Client.Close();
+                MessageAction?.Invoke(string.Format("link error：{0}\r\n", ex.ToString()));
             }
         }
 
@@ -94,33 +95,89 @@ namespace Container_Socket_Client
         {
             try
             {
-                Socket Client = (Socket)ar.AsyncState;
+                Client = (Socket)ar.AsyncState;
                 int DataSize = Client.EndReceive(ar);
-                if(DataSize>0)
+                string str = System.Text.Encoding.ASCII.GetString(DATA.buffer, 0, DataSize).Trim();
+
+                while (str.Length>10)//循环处理所有接收到的数据数据
+                {
+                    if (str.StartsWith("[C")||str.StartsWith("[U")||str.StartsWith("[N"))//判断 【箱号|重车牌|空车牌】 结果
+                    {
+                        int index= str.IndexOf("]")+1;//截取符合数据量，索引和实际数量差一
+                        string tmpData = str.Substring(0, index);
+                        str = str.Remove(0, index);
+
+                        MessageAction?.Invoke(string.Format("Get Date：{0}", DATA.SplitData(tmpData).Trim()));
+                    }
+                    else//删除第一位，重新校验
+                    {
+                        str = str.Remove(0, 1);
+                    }
+                }
+
+                if (DataSize > 0)//收到数据,循环接收数据。
                 {
                     Client.BeginReceive(DATA.buffer, 0, DATA.SIZE, 0, new AsyncCallback(ReceiveCallBack), Client);
-                    string str = System.Text.Encoding.ASCII.GetString(DATA.buffer, 0, DataSize).Trim();
-                    if (str.StartsWith("[C"))//判断最总结果
-                    {                        
-                        MessageAction?.Invoke(string.Format("Get Date：{0}", DATA.SplitData(str).Trim()));
-                    }
                 }
                 else
                 {
-                    MessageAction?.Invoke("link of close \n");
+                    Client.Close();
                     _Timer.Change(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+                    MessageAction?.Invoke("link of close \r\n");
                 }
             }
             catch (Exception ex)
             {
+                Client.Close();
+                _Timer.Change(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
                 MessageAction?.Invoke(ex.ToString());
             }
         }
+
+        #region IDisposable Support
+        private bool disposedValue = false; // 要检测冗余调用
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposedValue)
+            {
+                if (disposing)
+                {
+                    // TODO: 释放托管状态(托管对象)。
+                    _Timer.Dispose();
+                    Client.Dispose();
+                }
+
+                // TODO: 释放未托管的资源(未托管的对象)并在以下内容中替代终结器。
+                // TODO: 将大型字段设置为 null。
+
+                disposedValue = true;
+            }
+        }
+
+        // TODO: 仅当以上 Dispose(bool disposing) 拥有用于释放未托管资源的代码时才替代终结器。
+        // ~Container() {
+        //   // 请勿更改此代码。将清理代码放入以上 Dispose(bool disposing) 中。
+        //   Dispose(false);
+        // }
+
+        // 添加此代码以正确实现可处置模式。
+        public void Dispose()
+        {
+            // 请勿更改此代码。将清理代码放入以上 Dispose(bool disposing) 中。
+            Dispose(true);
+            // TODO: 如果在以上内容中替代了终结器，则取消注释以下行。
+            // GC.SuppressFinalize(this);
+        }
+        #endregion
     }
+
     class DATA
     {
         public static int SIZE = 4096;
         public static byte[] buffer = new byte[SIZE];
+        public static Dictionary<string, string> dict = new Dictionary<string, string>();
+
 
         /// <summary>
         /// 分解数据
@@ -128,28 +185,90 @@ namespace Container_Socket_Client
         /// <param name="str"></param>
         public static string SplitData(string str)
         {
+            string tmp = string.Empty;
             string[] tmpString = str.Split('|');
             tmpString[tmpString.Length - 1]=tmpString[tmpString.Length - 1].Split(']')[0];
-            Dictionary<string, string> dict = new Dictionary<string, string>();
-            dict["TriggerTime"] = tmpString[1];
-            dict["LaneNum"] = tmpString[2];
-            dict["ContainerType"]= tmpString[3];
-            dict["ContainerNum1"] = tmpString[4];
-            dict["CheckNum1"] = tmpString[5];
-            if(tmpString.Length==7)//单箱
+            if(tmpString[0]=="[C")
             {
-                dict["ISO1"] = tmpString[6];
+                tmp=ContainerNum(tmpString)["ContainerNum1"];
+            }
+            else if(tmpString[0]=="[U")
+            {
+                tmp=UpdateLpn(tmpString)["Lpn"];
+            }
+            else if(tmpString[0]=="[N")
+            {
+                tmp=NewLpn(tmpString)["Lpn"];
+            }
+            else
+            {
+                ;//预留
+            }
+            return tmp;
+        }
+
+
+        /// <summary>
+        /// 空车车牌
+        /// </summary>
+        /// <param name="str"></param>
+        /// <returns></returns>
+        public static Dictionary<string, string> NewLpn(string[] str)
+        {
+            dict["TriggerTime"] = str[1];
+            dict["LaneNum"] = str[2];
+            dict["Lpn"] = str[3];
+            dict["Color"] = str[4];
+
+            return dict;
+            //string jsonStr = JsonConvert.SerializeObject(dict);
+            //return jsonStr;            
+        }
+
+        /// <summary>
+        /// 重车车牌
+        /// </summary>
+        /// <param name="str"></param>
+        /// <returns></returns>
+        public static Dictionary<string, string> UpdateLpn(string[] str)
+        {
+            dict["TriggerTime"] = str[1];
+            dict["LaneNum"] = str[2];
+            dict["Lpn"] = str[3];
+            dict["Color"] = str[4];
+
+            return dict;
+            //string jsonStr = JsonConvert.SerializeObject(dict);
+            //return jsonStr;
+        }
+
+        /// <summary>
+        /// 集装箱
+        /// </summary>
+        /// <param name="str"></param>
+        /// <returns></returns>
+        public static Dictionary<string, string> ContainerNum(string[] str)
+        {
+            dict["TriggerTime"] = str[1];
+            dict["LaneNum"] = str[2];
+            dict["ContainerType"] = str[3];
+            dict["ContainerNum1"] = str[4];
+            dict["CheckNum1"] = str[5];
+            if (str.Length == 7)//单箱
+            {
+                dict["ISO1"] = str[6];
             }
             else//双箱==9
             {
-                dict["ContainerNum2"] = tmpString[6];
-                dict["CheckNum2"] = tmpString[7];
-                dict["ISO1"] = tmpString[8];
-                dict["ISO2"] = tmpString[9];
+                dict["ContainerNum2"] = str[6];
+                dict["CheckNum2"] = str[7];
+                dict["ISO1"] = str[8];
+                dict["ISO2"] = str[9];
             }
-            string jsonStr = JsonConvert.SerializeObject(dict);
-            return jsonStr;
-        }
 
+            return dict;
+            //string jsonStr = JsonConvert.SerializeObject(dict);
+            //return jsonStr;
+        }
     }
 }
